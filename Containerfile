@@ -236,23 +236,17 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 # the PostgreSQL docs note that even 90 seconds is not always enough.
 STOPSIGNAL SIGINT
 
-# DIVERGENCE: upstream ships no HEALTHCHECK. Uses TCP on loopback so it only
-# reports healthy after the init phase (which listens on the socket only).
-# On Kubernetes, ignore this and use a readinessProbe instead.
-HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \
-	CMD ["docker-healthcheck.sh"]
-
 EXPOSE 5432
 CMD ["postgres"]
 
 ARG IMAGE_SOURCE="https://github.com/boxtheta/psql-el-golden"
 ARG IMAGE_REVISION=""
 ARG IMAGE_CREATED=""
-LABEL org.opencontainers.image.title="postgresql" \
-      org.opencontainers.image.description="PostgreSQL ${PG_VERSION} on Rocky Linux 10.2" \
-      org.opencontainers.image.version="${PG_VERSION}" \
-      org.opencontainers.image.base.name="${ROCKY_IMAGE}:${ROCKY_TAG}" \
-      org.opencontainers.image.licenses="PostgreSQL" \
-      org.opencontainers.image.source="${IMAGE_SOURCE}" \
-      org.opencontainers.image.revision="${IMAGE_REVISION}" \
-      org.opencontainers.image.created="${IMAGE_CREATED}"
+LABEL org.opencontainers.image.title="postgresql"
+LABEL org.opencontainers.image.description="PostgreSQL ${PG_VERSION} on Rocky Linux 10.2"
+LABEL org.opencontainers.image.version="${PG_VERSION}"
+LABEL org.opencontainers.image.base.name="${ROCKY_IMAGE}:${ROCKY_TAG}"
+LABEL org.opencontainers.image.licenses="PostgreSQL"
+LABEL org.opencontainers.image.source="${IMAGE_SOURCE}"
+LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
+LABEL org.opencontainers.image.created="${IMAGE_CREATED}"
