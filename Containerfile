@@ -14,7 +14,7 @@
 #
 # Divergences from upstream are marked "DIVERGENCE:" and listed in README.md.
 
-ARG ROCKY_IMAGE=docker.io/rockylinux/rockylinux
+ARG ROCKY_IMAGE=ghcr.io/boxtheta/rockylinux
 # Pin to the dated tag, or better, to a digest: ROCKY_TAG=10.2@sha256:...
 ARG ROCKY_TAG=10.2.20260525.
 
@@ -32,7 +32,7 @@ ARG GOSU_VERSION=1.19
 ARG GOSU_STRATEGY=download
 # JIT pulls the LLVM runtime (~200 MB). Upstream ships it; most OLTP fleets
 # disable jit anyway. Opt in if you run analytic queries.
-ARG WITH_JIT=1
+ARG WITH_JIT=0
 # nss_wrapper is only needed if you run with an arbitrary --user uid that has
 # no /etc/passwd entry (OpenShift-style). Comes from EPEL; verify availability
 # for EL10 on your mirror before enabling.
@@ -250,3 +250,5 @@ LABEL org.opencontainers.image.licenses="PostgreSQL"
 LABEL org.opencontainers.image.source="${IMAGE_SOURCE}"
 LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 LABEL org.opencontainers.image.created="${IMAGE_CREATED}"
+LABEL org.opencontainers.image.vendor="boxtheta.eu"
+LABEL org.opencontainers.image.authors="BoxTheta"
