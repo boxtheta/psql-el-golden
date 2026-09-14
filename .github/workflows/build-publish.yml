@@ -1,0 +1,116 @@
+name: Build and publish images
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - Containerfile
+      - docker-entrypoint.sh
+      - docker-ensure-initdb.sh
+      - docker-healthcheck.sh
+      - smoke-test.sh
+      - .github/workflows/build-publish.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr.io/<owner>/postgresql, matching compose.yaml / README
+  IMAGE_NAME: ${{ github.repository_owner }}/postgresql
+
+jobs:
+  build:
+    name: build (${{ matrix.flavor }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: default
+            suffix: ""
+            build_args: |
+              WITH_JIT=0
+              WITH_GIS=0
+          - flavor: jit
+            suffix: "-jit"
+            build_args: |
+              WITH_JIT=1
+              WITH_GIS=0
+          - flavor: gis
+            suffix: "-gis"
+            build_args: |
+              WITH_JIT=0
+              WITH_GIS=1
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # PG_VERSION/ROCKY_TAG are pinned in the Containerfile itself (golden
+      # image = never float); read them from there instead of duplicating
+      # the pin in workflow config where it could drift out of sync.
+      - name: Read pinned versions from the Containerfile
+        id: vars
+        run: |
+          set -euo pipefail
+          pg_version=$(sed -n 's/^ARG PG_VERSION=//p' Containerfile | head -1)
+          rocky_tag=$(sed -n 's/^ARG ROCKY_TAG=//p' Containerfile | head -1)
+          rocky_mm=$(cut -d. -f1,2 <<<"$rocky_tag")
+          [ -n "$pg_version" ]
+          [ -n "$rocky_mm" ]
+          {
+            echo "tag=${pg_version}-rocky${rocky_mm}${{ matrix.suffix }}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (${{ matrix.flavor }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          load: true
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+          build-args: |
+            ${{ matrix.build_args }}
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_CREATED=${{ steps.vars.outputs.created }}
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.flavor }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}
+
+      # Acceptance gate — see smoke-test.sh. Must pass before anything is
+      # published under this tag.
+      - name: Smoke test
+        env:
+          RUNTIME: docker
+        run: bash ./smoke-test.sh "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}"
+
+      # workflow_dispatch can be run from any branch; only master content
+      # may ever land on the released tags.
+      - name: Push (${{ matrix.flavor }})
+        if: github.ref == 'refs/heads/master'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+          build-args: |
+            ${{ matrix.build_args }}
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_CREATED=${{ steps.vars.outputs.created }}
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.flavor }}

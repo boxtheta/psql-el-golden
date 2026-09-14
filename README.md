@@ -17,6 +17,24 @@ unchanged.
 | `smoke-test.sh` | acceptance gate; run before promoting a build |
 | `compose.yaml` | reference runtime config |
 | `Dockerfile.upstream-bookworm` | the upstream Dockerfile, kept for diffing |
+| `.github/workflows/build-publish.yml` | builds and publishes the three flavors below |
+
+## Published images
+
+CI builds three flavors on every push to `master` and publishes them to
+`ghcr.io/<owner>/postgresql`, each gated behind `smoke-test.sh`:
+
+| Flavor | Tag | Build args |
+|---|---|---|
+| default | `18.6-rocky10.2` | none |
+| JIT | `18.6-rocky10.2-jit` | `WITH_JIT=1` |
+| GIS | `18.6-rocky10.2-gis` | `WITH_GIS=1` |
+
+The version segment of the tag is read from `PG_VERSION`/`ROCKY_TAG` in the
+Containerfile, so it moves in lockstep with the pin — the workflow never
+hardcodes it. The first push creates the GHCR package as **private**; flip it
+to public in the package settings once, or `docker pull`/the sample
+`compose.yaml` won't work for anyone else.
 
 ## Build
 
@@ -40,6 +58,8 @@ Build args worth knowing:
 | `GOSU_STRATEGY` | `download` | `setpriv-shim` for builders with no github.com egress |
 | `WITH_JIT` | `0` | `1` installs `postgresql18-llvmjit` (+~200 MB) |
 | `WITH_NSS_WRAPPER` | `0` | only needed for arbitrary-uid runs; pulls EPEL |
+| `WITH_GIS` | `0` | `1` installs PostGIS (`postgis${POSTGIS_MAJOR}_18`, +~150 MB) |
+| `POSTGIS_MAJOR` | `35` | PostGIS release feeding the PGDG package name; only used when `WITH_GIS=1` |
 | `HARDEN` | `1` | strips setuid/setgid bits from the base OS |
 | `PGDG_REPO_RPM_SHA256` | *(empty)* | pin the PGDG repo RPM; the build prints the hash when unset |
 
@@ -83,15 +103,21 @@ mounted by this image and vice versa.
    in your EL10 mirror before enabling, and if it doesn't, either run as
    `999:999` or build it from source (cwrap.org, small CMake project). Without
    it, arbitrary-uid runs fail at `initdb`.
-4. **A `HEALTHCHECK` is defined.** Upstream ships none on purpose. It probes
+4. **PostGIS is off by default.** Upstream doesn't ship it at all; it's a
+   PGDG extra here. Set `WITH_GIS=1` to install it — the package name is
+   versioned as `postgis${POSTGIS_MAJOR}_18`, so bump `POSTGIS_MAJOR` if your
+   mirror only carries a newer PostGIS for PG 18. Pulls in GEOS/GDAL/PROJ
+   (+~150 MB). `shp2pgsql`/`raster2pgsql` and friends live in a separate
+   `-utils` PGDG package, not installed here.
+5. **A `HEALTHCHECK` is defined.** Upstream ships none on purpose. It probes
    loopback TCP so it can't report healthy during bootstrap. On Kubernetes,
    override it away and use a real readiness probe.
-5. **setuid/setgid bits are stripped** from the base OS (`HARDEN=1`). Nothing
+6. **setuid/setgid bits are stripped** from the base OS (`HARDEN=1`). Nothing
    PostgreSQL needs is setuid. This does mean the image is not intended for
    installing packages at runtime — which is the point of a golden image.
-6. **`/var/lib/pgsql` exists but is unused.** The PGDG RPMs own it. It's left in
+7. **`/var/lib/pgsql` exists but is unused.** The PGDG RPMs own it. It's left in
    place so `rpm -V` stays clean; ignore it, `PGDATA` is elsewhere.
-7. **`systemd` may be pulled in** as an RPM scriptlet dependency of
+8. **`systemd` may be pulled in** as an RPM scriptlet dependency of
    `postgresql18-server`. Nothing runs it. If image size matters more than a
    clean rpmdb, the usual fix is a two-stage build with
    `dnf --installroot`; that was left out here to keep the Dockerfile auditable.

@@ -54,7 +54,7 @@ $RUNTIME run -d --name "$NAME" \
 	-e POSTGRES_DB=smokedb \
 	-e POSTGRES_INITDB_ARGS='--data-checksums' \
 	-v "$VOL":/var/lib/postgresql \
-	-v /tmp/"$NAME"-init:/docker-entrypoint-initdb.d:ro \
+	-v /tmp/"$NAME"-init:/docker-entrypoint-initdb.d:ro,z \
 	"$IMAGE" -c shared_preload_libraries=pg_stat_statements >/dev/null
 
 for i in $(seq 1 60); do
@@ -93,8 +93,9 @@ $RUNTIME exec -e PGPASSWORD=smoke "$NAME" psql -h 127.0.0.1 -U postgres -d smoke
 	"select count(*) from smoke" | grep -qx 1 \
 	&& pass 'data survived restart on the named volume' || fail 'data loss across restart'
 
-$RUNTIME exec "$NAME" bash -c 'grep -q "shutting down\|database system is shut down" /dev/null; true'
-$RUNTIME logs "$NAME" 2>&1 | grep -q 'received fast shutdown request' \
+# logging_collector is on in the PGDG sample conf, so server log lines go to
+# $PGDATA/log/*.log, not container stdout — `docker logs` never sees them.
+$RUNTIME exec "$NAME" bash -c 'grep -rq "received fast shutdown request" "$PGDATA/log/"' \
 	&& pass 'SIGINT produced a fast shutdown' || fail 'STOPSIGNAL did not trigger fast shutdown'
 
 echo

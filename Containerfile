@@ -16,7 +16,7 @@
 
 ARG ROCKY_IMAGE=ghcr.io/boxtheta/rockylinux
 # Pin to the dated tag, or better, to a digest: ROCKY_TAG=10.2@sha256:...
-ARG ROCKY_TAG=10.2.20260525.
+ARG ROCKY_TAG=10.2.20260525.0
 
 FROM ${ROCKY_IMAGE}:${ROCKY_TAG}
 
@@ -37,6 +37,12 @@ ARG WITH_JIT=0
 # no /etc/passwd entry (OpenShift-style). Comes from EPEL; verify availability
 # for EL10 on your mirror before enabling.
 ARG WITH_NSS_WRAPPER=0
+# PostGIS adds spatial types/functions via CREATE EXTENSION postgis. Pulls in
+# GEOS/GDAL/PROJ (~150 MB). The PGDG package name is versioned per PostGIS
+# release (postgis<POSTGIS_MAJOR>_<PG_MAJOR>) — verify the exact version
+# available for EL10/PG18 on your mirror before enabling.
+ARG WITH_GIS=0
+ARG POSTGIS_MAJOR=35
 # Strip setuid/setgid bits from the base OS (nothing here needs them).
 ARG HARDEN=1
 # Optional supply-chain pin for the PGDG repo RPM (sha256 of the .noarch.rpm).
@@ -174,6 +180,15 @@ RUN set -eux; \
 		dnf -y remove epel-release; \
 		ls -1 {/usr,}/lib{/*,}/libnss_wrapper.so 2>/dev/null | head -1; \
 	fi; \
+	if [ "$WITH_GIS" = '1' ]; then \
+# postgis's GDAL dependency needs hdf5/xerces-c, which live in EPEL, not the
+# base or PGDG repos.
+		dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+			"https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm"; \
+		dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+			"postgis${POSTGIS_MAJOR}_${PG_MAJOR}"; \
+		dnf -y remove epel-release; \
+	fi; \
 	\
 	dnf clean all; \
 	rm -rf /var/cache/dnf /var/cache/libdnf5 /var/log/dnf.* /var/log/hawkey.log
@@ -185,7 +200,10 @@ RUN set -eux; \
 	postgres --version | grep -F "PostgreSQL) ${PG_VERSION}"; \
 	initdb --version; \
 	psql --version; \
-	pg_isready --version
+	pg_isready --version; \
+	if [ "$WITH_GIS" = '1' ]; then \
+		test -f "/usr/pgsql-${PG_MAJOR}/share/extension/postgis.control"; \
+	fi
 
 # make the sample config "correct by default" — the entrypoint copies this into
 # a fresh PGDATA, so listen_addresses must be '*' for the container to be usable
