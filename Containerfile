@@ -245,7 +245,7 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \
 EXPOSE 5432
 CMD ["postgres"]
 
-ARG IMAGE_SOURCE=""
+ARG IMAGE_SOURCE="https://github.com/boxtheta/psql-el-golden"
 ARG IMAGE_REVISION=""
 ARG IMAGE_CREATED=""
 LABEL org.opencontainers.image.title="postgresql" \
