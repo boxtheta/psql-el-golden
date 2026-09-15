@@ -10,25 +10,34 @@ unchanged.
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | the image |
+| `Containerfile` | the image |
 | `docker-entrypoint.sh` | **unmodified upstream** |
 | `docker-ensure-initdb.sh` | **unmodified upstream** |
 | `docker-healthcheck.sh` | added — `pg_isready` over loopback TCP |
 | `smoke-test.sh` | acceptance gate; run before promoting a build |
 | `compose.yaml` | reference runtime config |
 | `Dockerfile.upstream-bookworm` | the upstream Dockerfile, kept for diffing |
-| `.github/workflows/build-publish.yml` | builds and publishes the three flavors below |
+| `.github/workflows/build-publish.yml` | builds and publishes the three flavors below, amd64+arm64 |
 
 ## Published images
 
-CI builds three flavors on every push to `master` and publishes them to
-`ghcr.io/<owner>/postgresql`, each gated behind `smoke-test.sh`:
+CI builds three flavors, each for `linux/amd64` and `linux/arm64`, on every
+push to `master`, and publishes them to `ghcr.io/<owner>/postgresql` as
+multi-arch manifests:
 
 | Flavor | Tag | Build args |
 |---|---|---|
 | default | `18.6-rocky10.2` | none |
 | JIT | `18.6-rocky10.2-jit` | `WITH_JIT=1` |
 | GIS | `18.6-rocky10.2-gis` | `WITH_GIS=1` |
+
+Every (flavor, arch) pair is built and gated behind `smoke-test.sh` on a
+natively-architected runner — no QEMU — before it's published. Passing legs
+are pushed as untagged, digest-only images; a merge step then runs
+`docker buildx imagetools create` to assemble the amd64 + arm64 digests for
+each flavor into one OCI manifest list under that flavor's tag, so
+`docker pull ghcr.io/<owner>/postgresql:18.6-rocky10.2` resolves to the right
+architecture automatically on either host.
 
 The version segment of the tag is read from `PG_VERSION`/`ROCKY_TAG` in the
 Containerfile, so it moves in lockstep with the pin — the workflow never
@@ -37,6 +46,8 @@ to public in the package settings once, or `docker pull`/the sample
 `compose.yaml` won't work for anyone else.
 
 ## Build
+
+Single-arch, for the machine you're building on:
 
 ```bash
 docker build \
@@ -48,6 +59,32 @@ docker build \
 
 ./smoke-test.sh registry.example.com/platform/postgresql:18.6-rocky10.2
 ```
+
+Multi-arch, producing one manifest list covering both architectures (what CI
+does, minus the per-arch smoke-test gate — see the caveat below):
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --build-arg ROCKY_TAG=10.2.20260525.0 \
+  --build-arg PG_VERSION=18.6 \
+  --build-arg IMAGE_REVISION="$(git rev-parse HEAD)" \
+  --build-arg IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t registry.example.com/platform/postgresql:18.6-rocky10.2 \
+  --push .
+```
+
+`buildx` builds both platforms and pushes a single manifest list under that
+tag; `docker pull` then resolves the right architecture on either host. The
+caveat: `docker buildx build ... --push` with multiple `--platform` values
+can't also `--load` into your local daemon, so there's nothing to point
+`smoke-test.sh` at from this one command — either run it per-arch first (see
+`.github/workflows/build-publish.yml` for the build → smoke-test → push
+sequence CI follows), or accept that this path skips the acceptance gate.
+Building the non-native platform also runs under QEMU unless you're on real
+arm64 hardware, which is slow and, for the reasons above, untested here —
+prefer letting CI publish multi-arch tags and use this only for one-off local
+builds.
 
 Build args worth knowing:
 
@@ -109,18 +146,26 @@ mounted by this image and vice versa.
    mirror only carries a newer PostGIS for PG 18. Pulls in GEOS/GDAL/PROJ
    (+~150 MB). `shp2pgsql`/`raster2pgsql` and friends live in a separate
    `-utils` PGDG package, not installed here.
-5. **A `HEALTHCHECK` is defined.** Upstream ships none on purpose. It probes
+5. **`logging_collector` is forced off**, matching upstream. The PGDG sample
+   conf ships it `on`, which sends server log lines to `$PGDATA/log/*.log`
+   instead of stderr — invisible to `docker logs`/`kubectl logs` and any log
+   shipper reading container output. This is patched into the *sample* conf
+   at build time, the same way `listen_addresses` is, so it only takes effect
+   for a freshly-initialized `PGDATA`. Volumes initialized before this change
+   keep `logging_collector = on`; override it explicitly
+   (`-c logging_collector=off`) or edit `postgresql.conf` in the volume.
+6. **A `HEALTHCHECK` is defined.** Upstream ships none on purpose. It probes
    loopback TCP so it can't report healthy during bootstrap. On Kubernetes,
    override it away and use a real readiness probe.
-6. **setuid/setgid bits are stripped** from the base OS (`HARDEN=1`). Nothing
+7. **setuid/setgid bits are stripped** from the base OS (`HARDEN=1`). Nothing
    PostgreSQL needs is setuid. This does mean the image is not intended for
    installing packages at runtime — which is the point of a golden image.
-7. **`/var/lib/pgsql` exists but is unused.** The PGDG RPMs own it. It's left in
+8. **`/var/lib/pgsql` exists but is unused.** The PGDG RPMs own it. It's left in
    place so `rpm -V` stays clean; ignore it, `PGDATA` is elsewhere.
-8. **`systemd` may be pulled in** as an RPM scriptlet dependency of
+9. **`systemd` may be pulled in** as an RPM scriptlet dependency of
    `postgresql18-server`. Nothing runs it. If image size matters more than a
    clean rpmdb, the usual fix is a two-stage build with
-   `dnf --installroot`; that was left out here to keep the Dockerfile auditable.
+   `dnf --installroot`; that was left out here to keep the Containerfile auditable.
 
 ## Production notes
 
@@ -154,8 +199,9 @@ to 999. Once the volume is initialised you can pin `user: "999:999"` and add
 container can't read `/docker-entrypoint-initdb.d`. Named volumes are relabelled
 for you.
 
-**Rocky 10 requires x86-64-v3.** Support for x86-64-v2 was dropped in Rocky 10.
-Anything older than roughly Haswell / Zen will not boot this image.
+**Rocky 10 requires x86-64-v3 on amd64.** Support for x86-64-v2 was dropped in
+Rocky 10. Anything older than roughly Haswell / Zen will not boot the amd64
+image. Doesn't apply to the `arm64` build.
 
 **Rebuild cadence.** Pinning `PG_VERSION` and `ROCKY_TAG` means the image does
 not pick up CVE fixes on its own. Rebuild on a schedule and on PGDG/Rocky

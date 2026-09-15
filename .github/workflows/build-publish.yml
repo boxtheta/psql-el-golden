@@ -22,12 +22,45 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/postgresql
 
 jobs:
-  build:
-    name: build (${{ matrix.flavor }})
+  # PG_VERSION/ROCKY_TAG are pinned in the Containerfile itself (golden image
+  # = never float); read them here once instead of duplicating the pin in
+  # workflow config where it could drift, and share one IMAGE_CREATED across
+  # every leg below so identical build-args keep the buildx cache warm.
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      base_tag: ${{ steps.vars.outputs.base_tag }}
+      created: ${{ steps.vars.outputs.created }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned versions from the Containerfile
+        id: vars
+        run: |
+          set -euo pipefail
+          pg_version=$(sed -n 's/^ARG PG_VERSION=//p' Containerfile | head -1)
+          rocky_tag=$(sed -n 's/^ARG ROCKY_TAG=//p' Containerfile | head -1)
+          rocky_mm=$(cut -d. -f1,2 <<<"$rocky_tag")
+          [ -n "$pg_version" ]
+          [ -n "$rocky_mm" ]
+          {
+            echo "base_tag=${pg_version}-rocky${rocky_mm}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+  # One leg per (flavor, arch), each on a natively-architected runner (no
+  # QEMU) so smoke-test.sh exercises the real binaries before anything is
+  # published. Passing legs push an untagged, digest-only image; the merge
+  # job below assembles those into one multi-arch manifest per flavor.
+  build:
+    needs: prepare
+    name: build (${{ matrix.flavor }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
       matrix:
+        flavor: [default, jit, gis]
+        arch: [amd64, arm64]
         include:
           - flavor: default
             suffix: ""
@@ -44,26 +77,15 @@ jobs:
             build_args: |
               WITH_JIT=0
               WITH_GIS=1
+          - arch: amd64
+            runs_on: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runs_on: ubuntu-24.04-arm
+            platform: linux/arm64
     steps:
       - name: Check out
         uses: actions/checkout@v4
-
-      # PG_VERSION/ROCKY_TAG are pinned in the Containerfile itself (golden
-      # image = never float); read them from there instead of duplicating
-      # the pin in workflow config where it could drift out of sync.
-      - name: Read pinned versions from the Containerfile
-        id: vars
-        run: |
-          set -euo pipefail
-          pg_version=$(sed -n 's/^ARG PG_VERSION=//p' Containerfile | head -1)
-          rocky_tag=$(sed -n 's/^ARG ROCKY_TAG=//p' Containerfile | head -1)
-          rocky_mm=$(cut -d. -f1,2 <<<"$rocky_tag")
-          [ -n "$pg_version" ]
-          [ -n "$rocky_mm" ]
-          {
-            echo "tag=${pg_version}-rocky${rocky_mm}${{ matrix.suffix }}"
-            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -75,42 +97,105 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build (${{ matrix.flavor }})
+      - name: Build (${{ matrix.platform }})
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Containerfile
+          platforms: ${{ matrix.platform }}
           load: true
           push: false
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.base_tag }}${{ matrix.suffix }}
           build-args: |
             ${{ matrix.build_args }}
             IMAGE_REVISION=${{ github.sha }}
-            IMAGE_CREATED=${{ steps.vars.outputs.created }}
+            IMAGE_CREATED=${{ needs.prepare.outputs.created }}
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=${{ matrix.flavor }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}
+          cache-from: type=gha,scope=${{ matrix.flavor }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}-${{ matrix.arch }}
 
-      # Acceptance gate — see smoke-test.sh. Must pass before anything is
-      # published under this tag.
+      # Acceptance gate — see smoke-test.sh. Must pass before this leg's
+      # digest is pushed.
       - name: Smoke test
         env:
           RUNTIME: docker
-        run: bash ./smoke-test.sh "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}"
+        run: bash ./smoke-test.sh "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.base_tag }}${{ matrix.suffix }}"
 
-      # workflow_dispatch can be run from any branch; only master content
-      # may ever land on the released tags.
-      - name: Push (${{ matrix.flavor }})
+      # workflow_dispatch can run from any branch; only master content may
+      # ever land on the released tags.
+      - name: Push by digest
         if: github.ref == 'refs/heads/master'
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Containerfile
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+          platforms: ${{ matrix.platform }}
           build-args: |
             ${{ matrix.build_args }}
             IMAGE_REVISION=${{ github.sha }}
-            IMAGE_CREATED=${{ steps.vars.outputs.created }}
+            IMAGE_CREATED=${{ needs.prepare.outputs.created }}
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=${{ matrix.flavor }}
+          cache-from: type=gha,scope=${{ matrix.flavor }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        if: github.ref == 'refs/heads/master'
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.push.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.flavor }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assembles the amd64 + arm64 digests for each flavor into one multi-arch
+  # manifest under the flavor's released tag.
+  merge:
+    needs: [prepare, build]
+    if: github.ref == 'refs/heads/master'
+    name: publish (${{ matrix.flavor }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flavor: [default, jit, gis]
+        include:
+          - flavor: default
+            suffix: ""
+          - flavor: jit
+            suffix: "-jit"
+          - flavor: gis
+            suffix: "-gis"
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.flavor }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          tag="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.base_tag }}${{ matrix.suffix }}"
+          refs=()
+          for f in *; do refs+=("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:$f"); done
+          docker buildx imagetools create -t "$tag" "${refs[@]}"
+          docker buildx imagetools inspect "$tag"

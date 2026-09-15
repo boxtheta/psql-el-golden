@@ -83,6 +83,17 @@ $RUNTIME exec "$NAME" psql -U postgres -d smokedb -tAc 'select 1' >/dev/null \
 
 echo "== restart / persistence =="
 $RUNTIME stop -t 60 "$NAME" >/dev/null
+
+# Checked here, before the container is started again, so this doesn't
+# depend on log continuity across the restart below. Capture first instead of
+# piping straight into `grep -q`: under `pipefail`, grep -q closes its end of
+# the pipe as soon as it matches, and the still-writing `logs` process gets
+# SIGPIPE'd — pipefail then reports that non-zero exit as the pipeline's
+# result even though the pattern was genuinely found.
+container_logs="$($RUNTIME logs "$NAME" 2>&1)"
+grep -q 'received fast shutdown request' <<<"$container_logs" \
+	&& pass 'SIGINT produced a fast shutdown' || fail 'STOPSIGNAL did not trigger fast shutdown'
+
 $RUNTIME start "$NAME" >/dev/null
 for i in $(seq 1 30); do
 	$RUNTIME exec "$NAME" pg_isready -q -h 127.0.0.1 -U postgres -d smokedb && break
@@ -92,11 +103,6 @@ done
 $RUNTIME exec -e PGPASSWORD=smoke "$NAME" psql -h 127.0.0.1 -U postgres -d smokedb -tAc \
 	"select count(*) from smoke" | grep -qx 1 \
 	&& pass 'data survived restart on the named volume' || fail 'data loss across restart'
-
-# logging_collector is on in the PGDG sample conf, so server log lines go to
-# $PGDATA/log/*.log, not container stdout — `docker logs` never sees them.
-$RUNTIME exec "$NAME" bash -c 'grep -rq "received fast shutdown request" "$PGDATA/log/"' \
-	&& pass 'SIGINT produced a fast shutdown' || fail 'STOPSIGNAL did not trigger fast shutdown'
 
 echo
 echo "ALL CHECKS PASSED for $IMAGE"

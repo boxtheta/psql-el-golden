@@ -14,7 +14,9 @@
 #
 # Divergences from upstream are marked "DIVERGENCE:" and listed in README.md.
 
-ARG ROCKY_IMAGE=ghcr.io/boxtheta/rockylinux
+# Official upstream image — multi-arch (amd64/arm64/ppc64le/s390x/riscv64),
+# which is what makes the aarch64 build below possible.
+ARG ROCKY_IMAGE=docker.io/rockylinux/rockylinux
 # Pin to the dated tag, or better, to a digest: ROCKY_TAG=10.2@sha256:...
 ARG ROCKY_TAG=10.2.20260525.0
 
@@ -207,12 +209,20 @@ RUN set -eux; \
 
 # make the sample config "correct by default" — the entrypoint copies this into
 # a fresh PGDATA, so listen_addresses must be '*' for the container to be usable
+#
+# DIVERGENCE: the PGDG sample ships logging_collector=on (upstream/Debian
+# ships it off). With it on, server log lines go to $PGDATA/log/*.log instead
+# of stderr, so `docker logs`/`kubectl logs` only ever show the bootstrap
+# output — a real blind spot for log shippers. Force it off to match upstream
+# and keep logs on the container's stdout/stderr.
 RUN set -eux; \
 	sample="/usr/pgsql-${PG_MAJOR}/share/postgresql.conf.sample"; \
 	[ -f "$sample" ]; \
 	cp -v "$sample" "${sample}.rpmorig"; \
 	sed -ri "s!^#?(listen_addresses)\s*=\s*\S+.*!\1 = '*'!" "$sample"; \
-	grep -F "listen_addresses = '*'" "$sample"
+	sed -ri "s!^#?(logging_collector)\s*=\s*\S+.*!\1 = off!" "$sample"; \
+	grep -F "listen_addresses = '*'" "$sample"; \
+	grep -F "logging_collector = off" "$sample"
 
 RUN mkdir /docker-entrypoint-initdb.d
 RUN install --verbose --directory --owner postgres --group postgres --mode 3777 /var/run/postgresql
