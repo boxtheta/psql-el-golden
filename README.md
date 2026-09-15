@@ -5,19 +5,6 @@ A functional port of `docker-library/postgres:18` (bookworm) onto a Rocky Linux
 upstream, so every documented environment variable and behaviour of the
 reference image works unchanged.
 
-## Contents
-
-| File | Purpose |
-|---|---|
-| `Containerfile` | the image |
-| `docker-entrypoint.sh` | **unmodified upstream** |
-| `docker-ensure-initdb.sh` | **unmodified upstream** |
-| `docker-healthcheck.sh` | shipped but not wired up (see divergences) — `pg_isready` over loopback TCP |
-| `smoke-test.sh` | acceptance gate; run before promoting a build |
-| `compose.yaml` | reference runtime config |
-| `Dockerfile.upstream-bookworm` | the upstream Dockerfile, kept for diffing |
-| `.github/workflows/build-publish.yml` | builds and publishes the images below |
-
 ## Published images
 
 CI builds three flavors for `linux/amd64` + `linux/arm64` on every push to
