@@ -123,6 +123,12 @@ jobs:
 
       # workflow_dispatch can run from any branch; only master content may
       # ever land on the released tags.
+      # provenance: false — buildx attaches a provenance attestation by
+      # default, which pushes as an extra `unknown/unknown` manifest entry
+      # alongside the real one. `imagetools create` below then merges each
+      # per-arch digest (itself a 2-entry index once attestations are in
+      # play) into a manifest list that mispublishes or 404s on pull. One
+      # real manifest per digest keeps the merge a plain 1:1 index.
       - name: Push by digest
         if: github.ref == 'refs/heads/master'
         id: push
@@ -131,6 +137,7 @@ jobs:
           context: .
           file: Containerfile
           platforms: ${{ matrix.platform }}
+          provenance: false
           build-args: |
             ${{ matrix.build_args }}
             IMAGE_REVISION=${{ github.sha }}
